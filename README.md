@@ -1,1 +1,1 @@
-#SDA-DDA: Semi-supervised Domain Adaptation with Dynamic Distribution Alignment Network For Emotion Recognition Using EEG Signals
+#HADUA: Hierarchical Attention and Dynamic Uniform Alignment for Robust Cross-Subject Emotion Recognition
