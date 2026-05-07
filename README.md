@@ -211,20 +211,6 @@ The following results are reported under the cross-subject multimodal emotion re
 | CSMM | 94.96±5.27 | 95.21±7.96 | 96.20±3.98 | 89.82±6.22 | 90.03±6.19 | 93.01±4.25 |
 | **HADUA** | **94.68±3.91** | **94.69±3.74** | **97.68±2.50** | **92.00±5.29** | **92.88±4.64** | **92.02±5.05** |
 
----
-
-## Ablation Study
-
-| Variant | SEED Acc | SEED-IV Acc |
-|---|---:|---:|
-| Deep Feedforward Network | 85.18±5.60 | 81.00±11.11 |
-| + Hierarchical Attention-based Multimodal Fusion | 90.94±4.62 | 88.94±6.89 |
-| + Marginal Distribution Alignment | 93.50±3.99 | 90.89±7.07 |
-| + Dynamic Gaussian Confidence-weighted Domain Adaptation | 94.42±4.22 | 91.46±7.11 |
-| + Uniform Alignment Mechanism, HADUA | **94.68±3.91** | **92.00±5.29** |
-
----
-
 ## Model Components
 
 ### Hierarchical Attention-based Multimodal Fusion
