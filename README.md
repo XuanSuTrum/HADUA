@@ -38,23 +38,6 @@ HADUA/
 ├── load_data2_multi_eye.py      # EEG + eye-movement data loader
 └── utils.py                     # Utility functions
 ```
-
-Depending on your released version, the following dependent files may also be required:
-
-```text
-backbone.py
-get_dataset.py
-load_data2.py
-SDA_DDA.py
-SDA_DDA_2.py
-cmmd_2.py
-cmmd_3.py
-cmmd_4.py
-cmmd_5.py
-```
-
-Please make sure that all dependent modules imported by the training script are included in the repository or correctly added to the Python path.
-
 ---
 
 ## Requirements
@@ -175,17 +158,6 @@ The target subject is not included in the source-domain training set. Target-dom
 This follows the standard transductive unsupervised domain adaptation setting, where unlabeled target-domain samples may be available during adaptation, but their labels are hidden.
 
 ---
-
-## Leakage Prevention
-
-To avoid subject leakage and target-label leakage, this implementation follows the following rules:
-
-- source and target domains are separated at the subject level;
-- the held-out target subject is never used as a source subject;
-- target-domain ground-truth labels are not used for model optimization;
-- pseudo-labels are generated only from model predictions;
-- Soft Gaussian Weighting uses prediction confidence scores rather than target labels;
-- final metrics are computed only after training.
 
 ---
 
@@ -366,22 +338,10 @@ If you encounter a tensor shape mismatch, please check:
 - the input split in the data loader;
 - the input dimension settings in the model.
 
----
 
 ## Citation
 
 If you find this repository useful, please cite our work:
-
-```bibtex
-@article{tang2026hadua,
-  title   = {HADUA: Hierarchical Attention and Dynamic Uniform Alignment for Robust Cross-Subject Emotion Recognition},
-  author  = {Tang, Jiahao and Li, Youjun and Zheng, Yangxuan and Fan, Xiangting and Lu, Siyuan and Zhang, Nuo and Yao, Nan and Li, Xueping and Huang, Zi-Gang},
-  journal = {Under Review},
-  year    = {2026}
-}
-```
-
----
 
 ## Contact
 
