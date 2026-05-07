@@ -157,10 +157,6 @@ The target subject is not included in the source-domain training set. Target-dom
 
 This follows the standard transductive unsupervised domain adaptation setting, where unlabeled target-domain samples may be available during adaptation, but their labels are hidden.
 
----
-
----
-
 ## Running HADUA
 
 To train and evaluate HADUA, run:
