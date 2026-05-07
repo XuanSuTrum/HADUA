@@ -297,48 +297,6 @@ Before running the code, please check the following items:
 - [ ] Target labels are not used in the training loss.
 - [ ] Random seeds are fixed if deterministic behavior is required.
 
----
-
-## Troubleshooting
-
-### 1. `ModuleNotFoundError`
-
-If you encounter an error such as:
-
-```text
-ModuleNotFoundError: No module named 'xxx'
-```
-
-please check whether the corresponding Python file has been uploaded to the repository or added to your Python path.
-
----
-
-### 2. Dataset path error
-
-If the script cannot find the dataset files, please check the path settings in:
-
-```text
-load_data2_multi_eye.py
-```
-
-Make sure the EEG, eye-movement, and label files are placed in the expected directories.
-
----
-
-### 3. Feature dimension mismatch
-
-If you encounter a tensor shape mismatch, please check:
-
-- the EEG feature dimension;
-- the eye-movement feature dimension;
-- the input split in the data loader;
-- the input dimension settings in the model.
-
-
-## Citation
-
-If you find this repository useful, please cite our work:
-
 ## Contact
 
 For questions about the paper or code, please contact:
@@ -349,8 +307,6 @@ Xi'an Jiaotong University
 Email: tangjiahao@stu.xjtu.edu.cn
 ```
 
----
-
 ## License
 
 This repository is released for academic research purposes only.
@@ -358,8 +314,6 @@ This repository is released for academic research purposes only.
 Please check the licenses and usage agreements of the original datasets before using them. The datasets are not redistributed in this repository.
 
 If you use this code, please cite the corresponding paper and follow the dataset license requirements.
-
----
 
 ## Acknowledgement
 
