@@ -57,9 +57,10 @@ def create_domain_loaders(test_id, BATCH_SIZE):
     print('target_feature.shape', target_feature.shape)
     print('target_eye_feature.shape', target_eye_feature.shape)
 
-    # 目标域的训练数据和测试数据（这里假设全部用于训练和测试）
-    target_train_data, target_train_label, target_train_eye_data = target_feature, target_label, target_eye_feature
+    # Transductive UDA uses target features during adaptation, but not target labels.
+    target_train_data, target_train_eye_data = target_feature, target_eye_feature
     target_test_data, target_test_label, target_test_eye_data = target_feature, target_label, target_eye_feature
+    target_train_placeholder = np.zeros_like(target_label)
 
     # 合并EEG数据和眼动数据（按axis=1拼接）
     source_data_combined = np.concatenate([source_data, source_eye_data], axis=1)
@@ -74,7 +75,7 @@ def create_domain_loaders(test_id, BATCH_SIZE):
 
     torch_dataset_target_train = Data.TensorDataset(
         torch.from_numpy(target_train_data_combined).float(),
-        torch.from_numpy(target_train_label).long()
+        torch.from_numpy(target_train_placeholder).long()
     )
 
     torch_dataset_target_test = Data.TensorDataset(
