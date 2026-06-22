@@ -30,6 +30,7 @@ Cross-subject emotion recognition from physiological signals is challenging due 
 ```text
 HADUA/
 ├── README.md
+├── requirements.txt             # Python dependencies
 ├── main_zhibiao.py              # Main training and evaluation script
 ├── SDA_DDA_3.py                 # HADUA model
 ├── guessmatch.py                # Soft Gaussian Weighting / pseudo-label refinement
@@ -153,9 +154,11 @@ Source domain: labeled samples from source subjects
 Target domain: unlabeled samples from one held-out target subject
 ```
 
-The target subject is not included in the source-domain training set. Target-domain labels are not used during training or adaptation. They are used only for final evaluation.
+The target subject is not included in the source-domain training set. Target-domain labels are not used during training, adaptation, hyperparameter tuning, early stopping, or checkpoint selection.
 
-This follows the standard transductive unsupervised domain adaptation setting, where unlabeled target-domain samples may be available during adaptation, but their labels are hidden.
+Each model is trained for a fixed number of epochs (200 by default). No target-domain performance metric is computed during training. After the final epoch, the fixed model is evaluated once using target-domain labels.
+
+This follows the standard transductive unsupervised domain adaptation setting, where unlabeled target-domain samples may be available during adaptation, but their labels remain hidden until final evaluation.
 
 ## Running HADUA
 
@@ -280,7 +283,8 @@ Before running the code, please check the following items:
   - SEED-IV: 4 classes.
 - [ ] All required Python files are included in the repository.
 - [ ] The source and target subjects are separated at the subject level.
-- [ ] Target labels are not used in the training loss.
+- [ ] Target labels are not used in training, tuning, early stopping, or checkpoint selection.
+- [ ] The target domain is evaluated only once after fixed-epoch training.
 - [ ] Random seeds are fixed if deterministic behavior is required.
 
 ## Contact
