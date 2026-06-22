@@ -140,19 +140,9 @@ def tt(model, target_test_loader):
 def train(source_loader, target_train_loader, target_test_loader, model, optimizer):
     len_source_loader = len(source_loader)
     len_target_loader = len(target_train_loader)
-    best_acc = 0
-    best_precision = 0
-    best_f1 = 0
-    best_auc = 0
-    stop = 0
-    best_confusion_matrix = None
+
+    # Train for a fixed number of epochs without evaluating target labels.
     for e in range(args.n_epoch):
-        data_target_ = []
-        data_source_ = []
-        t_label_s = []
-        s_label_s = []
-        all_pseudo_labels = []
-        stop += 1
         train_loss_clf = utils.AverageMeter()
         train_loss_transfer = utils.AverageMeter()
         train_loss_cmmd_loss = utils.AverageMeter()
@@ -164,18 +154,20 @@ def train(source_loader, target_train_loader, target_test_loader, model, optimiz
         criterion = torch.nn.CrossEntropyLoss()
         for mlen in range(n_batch):
             data_source, label_source = next(iter_source)
-            data_target, label_target = next(iter_target)
+            data_target, _ = next(iter_target)
             if mlen % len(target_train_loader) == 0:
                 iter_target = iter(target_train_loader)
             if cuda:
                 data_source, label_source = data_source.cuda(), label_source.cuda()
-                data_target, label_target = data_target.cuda(), label_target.cuda()
+                data_target = data_target.cuda()
 
             data_source, label_source = data_source.to(DEVICE), label_source.to(DEVICE)
-            data_target, label_target = data_target.to(DEVICE), label_target.to(DEVICE)
+            data_target = data_target.to(DEVICE)
 
             optimizer.zero_grad()
-            label_source_pred, transfer_loss, cmmd_loss = model(e, data_source, data_target, label_source)
+            label_source_pred, transfer_loss, cmmd_loss = model(
+                e, data_source, data_target, label_source
+            )
 
             clf_loss = criterion(label_source_pred, label_source.float())
 
@@ -187,7 +179,7 @@ def train(source_loader, target_train_loader, target_test_loader, model, optimiz
             beta = segmented_function(e)
             beta_1 = segmented_function_1(e)
 
-            # 添加条件判断，如果clf_loss低于0.4，cmmd_loss前的权重为1，否则为0.1
+            # Set the CMMD weight according to the source classification loss.
             if clf_loss <= 0.1:
                 cmmd_weight = 1
             elif 0.1 < clf_loss < 0.15:
@@ -205,28 +197,31 @@ def train(source_loader, target_train_loader, target_test_loader, model, optimiz
             train_loss_cmmd_loss.update(cmmd_loss.item())
             train_loss_total.update(loss.item())
 
-            data_source_.append(data_source)
-            data_target_.append(data_target)
-            s_label_s.append(label_source)
-            t_label_s.append(label_target)
+        log.append([
+            train_loss_clf.avg,
+            train_loss_transfer.avg,
+            train_loss_cmmd_loss.avg,
+            train_loss_total.avg
+        ])
 
-        # Test
-        acc, pred, conf_matrix, precision, f1, auc = tt(model, target_test_loader)
-        log.append([train_loss_clf.avg, train_loss_transfer.avg, train_loss_cmmd_loss.avg, train_loss_total.avg])
-        np_log = np.array(log, dtype=float)
-        np.savetxt('F:\\Emotion_datasets\\SEED\\train_log.csv', np_log, delimiter=',', fmt='%.6f')
+    np_log = np.array(log, dtype=float)
+    np.savetxt(
+        'F:\\Emotion_datasets\\SEED\\train_log.csv',
+        np_log,
+        delimiter=',',
+        fmt='%.6f'
+    )
 
-        if best_acc < acc:
-            best_acc = acc
-            best_confusion_matrix = conf_matrix
-            best_precision = precision
-            best_f1 = f1
-            best_auc = auc
+    # Evaluate the target domain once after fixed-epoch training.
+    acc, pred, conf_matrix, precision, f1, auc = tt(
+        model, target_test_loader
+    )
 
     print('Transfer result: Acc: {:.4f}, Precision: {:.4f}, F1: {:.4f}, AUC: {:.4f}'.format(
-        best_acc, best_precision, best_f1, best_auc))
-    print('Confusion Matrix:\n', best_confusion_matrix)
-    return best_acc, best_confusion_matrix, best_precision, best_f1, best_auc
+        acc, precision, f1, auc))
+    print('Confusion Matrix:\n', conf_matrix)
+    return acc, conf_matrix, precision, f1, auc
+
 
 if __name__ == '__main__':
     all_test_results = []
