@@ -154,6 +154,8 @@ class Transfer_Net(nn.Module):
         return loss
 
     def visualization(self, source, source_labels, target, target_labels, tsne=1):
+        """Post-hoc visualization; target labels only determine plot colors."""
+        # This method is not called during training, adaptation, or model selection.
         # 提取源域和目标域的 EEG 和眼动特征
         feature_source_eeg = self.base_network(source[:, :310])
         feature_source_eye = self.base_network_eye(source[:, 310:])
