@@ -1,310 +1,130 @@
-# HADUA: Hierarchical Attention and Dynamic Uniform Alignment for Robust Cross-Subject Emotion Recognition
+# HADUA
 
-This repository provides the official PyTorch implementation of **HADUA**, a hierarchical attention and dynamic uniform alignment framework for robust cross-subject multimodal emotion recognition using EEG and eye-movement (EM) signals.
+Official PyTorch implementation of **HADUA: Hierarchical Attention and Dynamic
+Uniform Alignment for Robust Cross-Subject Emotion Recognition**.
 
-HADUA is designed for cross-subject physiological emotion recognition, where the model is trained with labeled source-subject data and adapted to an unlabeled target subject. The framework jointly addresses modality heterogeneity, pseudo-label noise, and class-wise pseudo-label imbalance.
+HADUA combines modality-specific EEG/eye feature extractors, hierarchical
+attention fusion, marginal MMD alignment, and confidence-weighted conditional
+MMD. Soft Gaussian Weighting continuously down-weights uncertain target
+predictions, while Uniform Alignment reduces class collapse in target
+pseudo-labels.
 
----
+## Reproducibility status
 
-## Overview
+This branch restores the missing backbone and the CMMD implementation found in
+the available experiment artifact, then fixes defects that made the public
+snapshot incomplete or methodologically unsafe. The implementation has
+synthetic unit tests, but the paper's numerical results have **not** been
+re-verified in CI because SEED, SEED-IV, and SEED-V are licensed datasets and
+are not distributed here. See [REPRODUCIBILITY_AUDIT.md](REPRODUCIBILITY_AUDIT.md)
+for provenance, resolved defects, and remaining limitations.
 
-Cross-subject emotion recognition from physiological signals is challenging due to large inter-subject variability and heterogeneous information between EEG and eye-movement modalities. HADUA addresses these challenges through three main components:
+Paper-reported results (not hard-coded and not claimed as reproduced here):
 
-1. **Hierarchical Attention-based Multimodal Fusion**
-   - EEG-specific self-attention;
-   - eye-movement-specific self-attention;
-   - EEG-guided cross-modal attention.
+| Dataset | Accuracy | Macro-F1 | Macro-AUC |
+|---|---:|---:|---:|
+| SEED | 94.68 +/- 3.91 | 94.69 +/- 3.74 | 97.68 +/- 2.50 |
+| SEED-IV | 92.00 +/- 5.29 | 92.88 +/- 4.64 | 92.02 +/- 5.05 |
+| SEED-V | 88.82 +/- 10.76 | 90.68 +/- 8.77 | 88.29 +/- 10.97 |
 
-2. **Multi-level Distribution Alignment**
-   - MMD for marginal distribution alignment;
-   - CMMD for conditional distribution alignment.
+## Installation
 
-3. **Confidence-driven Pseudo-label Optimization**
-   - Soft Gaussian Weighting for confidence-aware pseudo-label reweighting;
-   - Uniform Alignment for class-wise pseudo-label balancing.
-
----
-
-## Repository Structure
-
-```text
-HADUA/
-├── README.md
-├── requirements.txt             # Python dependencies
-├── main_zhibiao.py              # Main training and evaluation script
-├── SDA_DDA_3.py                 # HADUA model
-├── guessmatch.py                # Soft Gaussian Weighting / pseudo-label refinement
-├── mmd.py                       # MMD loss
-├── cmmd.py                      # CMMD loss
-├── load_data2_multi_eye.py      # EEG + eye-movement data loader
-└── utils.py                     # Utility functions
-```
----
-
-## Requirements
-
-The code was developed with Python and PyTorch.
-
-Recommended environment:
-
-```text
-Python >= 3.8
-PyTorch >= 2.1.0
-NumPy
-scikit-learn
-matplotlib
-```
-
-### Installation
-
-Create a conda environment:
+Python 3.10 or newer is recommended.
 
 ```bash
-conda create -n hadua python=3.8
-conda activate hadua
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-Install PyTorch and other dependencies:
+For tests:
 
 ```bash
-pip install torch torchvision torchaudio
-pip install numpy scikit-learn matplotlib
+python -m pip install -r requirements-dev.txt
+pytest -q
 ```
 
-Alternatively, create a `requirements.txt` file with the following content:
+## Data preparation
+
+Raw datasets are intentionally excluded. Request them from their official
+provider and export one NumPy file per subject:
 
 ```text
-torch>=2.1.0
-torchvision
-torchaudio
-numpy
-scikit-learn
-matplotlib
+<data-root>/
+├── EEG/
+│   ├── 1.npy       # [samples, 310]: 62 channels x 5 DE bands
+│   └── ...
+├── EYE/
+│   ├── 1.npy       # [samples, 33]
+│   └── ...
+└── Label/
+    ├── 1.npy       # [samples] indices or [samples, classes] one-hot
+    └── ...
 ```
 
-Then install dependencies by:
+The three arrays for a subject must contain the same number of samples. Paths
+are supplied at runtime; no machine-specific absolute path is stored in code.
+
+## Training
+
+The SEED multimodal subset used by the supplied artifact contains 12 subject
+files:
 
 ```bash
-pip install -r requirements.txt
+python main_zhibiao.py \
+  --data-root /path/to/preprocessed/SEED \
+  --subjects 1,2,3,4,5,8,9,10,11,12,13,14
 ```
 
----
-
-## Dataset Preparation
-
-This repository supports multimodal EEG and eye-movement emotion recognition experiments on datasets such as **SEED** and **SEED-IV**.
-
-Due to dataset license restrictions, the original datasets are not included in this repository. Please request the datasets from the official dataset provider and preprocess the EEG and eye-movement features before running the code.
-
-A recommended directory structure is:
-
-```text
-data/
-└── SEED/
-    └── multi-mode/
-        └── contact/
-            ├── EEG/
-            │   ├── 1.npy
-            │   ├── 2.npy
-            │   └── ...
-            ├── EYE/
-            │   ├── 1.npy
-            │   ├── 2.npy
-            │   └── ...
-            └── Label/
-                ├── 1.npy
-                ├── 2.npy
-                └── ...
-```
-
-Each subject should have three corresponding files:
-
-```text
-EEG/{subject_id}.npy
-EYE/{subject_id}.npy
-Label/{subject_id}.npy
-```
-
-Please modify the dataset paths in:
-
-```text
-load_data2_multi_eye.py
-```
-
-For example:
-
-```python
-EEG_FOLDER = "path/to/SEED/multi-mode/contact/EEG"
-EYE_FOLDER = "path/to/SEED/multi-mode/contact/EYE"
-LABEL_FOLDER = "path/to/SEED/multi-mode/contact/Label"
-```
-
-For SEED-IV, please use the corresponding SEED-IV feature directory and adjust the number of classes if necessary.
-
----
-
-## Evaluation Protocol
-
-The experiments follow a subject-level cross-subject domain adaptation protocol.
-
-For each run:
-
-```text
-Source domain: labeled samples from source subjects
-Target domain: unlabeled samples from one held-out target subject
-```
-
-The target subject is not included in the source-domain training set. Target-domain labels are not used during training, adaptation, hyperparameter tuning, early stopping, or checkpoint selection.
-
-Each model is trained for a fixed number of epochs (200 by default). No target-domain performance metric is computed during training. After the final epoch, the fixed model is evaluated once using target-domain labels.
-
-This follows the standard transductive unsupervised domain adaptation setting, where unlabeled target-domain samples may be available during adaptation, but their labels remain hidden until final evaluation.
-
-## Running HADUA
-
-To train and evaluate HADUA, run:
+Run a single LOSO target for a smoke test:
 
 ```bash
-python main_zhibiao.py
+python main_zhibiao.py \
+  --data-root /path/to/preprocessed/SEED \
+  --subjects 1,2,3,4,5,8,9,10,11,12,13,14 \
+  --target-subject 1 \
+  --epochs 1
 ```
 
-The script performs cross-subject training and evaluation. It reports the performance for each target subject and the average performance across subjects.
+Defaults follow the main paper implementation paragraph:
 
-The main reported metrics include:
+- Adam, learning rate `1e-4`, weight decay `5e-5`;
+- batch size `64`, fixed `100` epochs;
+- `gamma_mmd = 0.5`, `gamma_cmmd = 0.5`;
+- Soft Gaussian EMA momentum `0.999`, initial variance `1.0`;
+- UA temperature `1.0`, initial strength `0.3`.
 
-- Accuracy;
-- Precision;
-- Macro-F1;
-- AUC;
-- Confusion matrix.
+All values are command-line options. Use dataset-appropriate subject IDs and
+`--num-classes` for SEED-IV or SEED-V rather than editing source files.
 
-A typical output format is:
+## Leakage-safe protocol
+
+Each run holds out one complete subject as the target domain. The adaptation
+loader yields only target features; its dataset has no label field. Source
+classification, MMD, Soft Gaussian Weighting, UA, and CMMD cannot receive
+target labels.
+
+Training runs for a fixed epoch count. Target accuracy is not computed during
+training and cannot select a checkpoint or tune hyperparameters. The target
+label file is not opened until the separate evaluation loader is constructed
+after all parameter updates. Labels are then read for one final evaluation. Using
+the same unlabeled target features for transductive adaptation and final
+evaluation is standard transductive UDA; using their labels before final
+evaluation is prohibited.
+
+Outputs are written under `outputs/`, which is ignored by Git.
+
+## Repository layout
 
 ```text
-Processing test_id: 1
-Transfer result: Acc: XX.XXXX, Precision: XX.XXXX, F1: XX.XXXX, AUC: XX.XXXX
-Confusion Matrix:
-...
-
-Final Results:
-Average Accuracy: XX.XXXX ± XX.XXXX
-Average Precision: XX.XXXX ± XX.XXXX
-Average F1-Score: XX.XXXX ± XX.XXXX
-Average AUC: XX.XXXX ± XX.XXXX
-Average Confusion Matrix:
-...
+backbone.py                    modality-specific 310->64 and 33->64 MLPs
+SDA_DDA_3.py                   hierarchical attention and HADUA model
+guessmatch.py                  stateful Soft Gaussian Weighting and UA
+mmd.py                         marginal MMD
+cmmd.py                        confidence-weighted soft-label CMMD
+load_data2_multi_eye.py        LOSO data loading and label isolation
+main_zhibiao.py                CLI training and one-shot evaluation
+tests/test_hadua.py            synthetic regression tests
+REPRODUCIBILITY_AUDIT.md       provenance and method/code audit
 ```
-
----
-
-## Main Results
-
-The following results are reported under the cross-subject multimodal emotion recognition setting.
-
-### Comparison with Existing Methods
-
-| Method | SEED Acc | SEED Macro-F1 | SEED AUC | SEED-IV Acc | SEED-IV Macro-F1 | SEED-IV AUC |
-|---|---:|---:|---:|---:|---:|---:|
-| DGCNN | 79.95±9.02 | - | - | - | - | - |
-| MHESA | - | - | - | 83.25±9.98 | - | - |
-| CFDA-CSF | 90.04±5.46 | - | - | 89.60±6.65 | - | - |
-| MMDA | 94.82±2.41 | 94.75±2.47 | - | 85.54±8.11 | 85.28±8.05 | - |
-| CMSLNet | - | - | - | 83.15±9.84 | - | - |
-| MACDB | 90.49±4.04 | - | - | 83.02±4.67 | - | - |
-| CSMM | 94.96±5.27 | 95.21±7.96 | 96.20±3.98 | 89.82±6.22 | 90.03±6.19 | 93.01±4.25 |
-| **HADUA** | **94.68±3.91** | **94.69±3.74** | **97.68±2.50** | **92.00±5.29** | **92.88±4.64** | **92.02±5.05** |
-
-## Model Components
-
-### Hierarchical Attention-based Multimodal Fusion
-
-Implemented in:
-
-```text
-SDA_DDA_3.py
-```
-
-This module contains:
-
-- EEG self-attention;
-- eye-movement self-attention;
-- EEG-guided cross-attention;
-- multimodal feature fusion;
-- classification head.
-
-The fused representation is constructed from EEG self-attended features, eye-movement self-attended features, and cross-attended features.
-
----
-
-### MMD-based Marginal Distribution Alignment
-
-Implemented in:
-
-```text
-mmd.py
-```
-
-MMD is used to reduce global distribution discrepancy between source-domain and target-domain multimodal features.
-
----
-
-### CMMD-based Conditional Distribution Alignment
-
-Implemented in:
-
-```text
-cmmd.py
-```
-
-CMMD aligns class-conditional distributions between source and target domains. Since target-domain labels are unavailable during training, target-side class information is estimated using pseudo-label probabilities.
-
----
-
-### Soft Gaussian Weighting and Uniform Alignment
-
-Implemented in:
-
-```text
-guessmatch.py
-```
-
-Soft Gaussian Weighting assigns confidence-aware weights to target-domain pseudo-labels. Uniform Alignment adjusts target pseudo-label distributions to reduce class-wise imbalance during conditional alignment.
-
----
-
-## Reproducibility Checklist
-
-Before running the code, please check the following items:
-
-- [ ] Dataset paths in `load_data2_multi_eye.py` have been correctly modified.
-- [ ] EEG and eye-movement `.npy` files have been prepared.
-- [ ] The number of emotion classes is correctly configured.
-  - SEED: 3 classes;
-  - SEED-IV: 4 classes.
-- [ ] All required Python files are included in the repository.
-- [ ] The source and target subjects are separated at the subject level.
-- [ ] Target labels are not used in training, tuning, early stopping, or checkpoint selection.
-- [ ] The target domain is evaluated only once after fixed-epoch training.
-- [ ] Random seeds are fixed if deterministic behavior is required.
-
-## Contact
-
-For questions about the paper or code, please contact:
-
-```text
-Jiahao Tang
-Xi'an Jiaotong University
-Email: tangjiahao@stu.xjtu.edu.cn
-```
-
-## License
-
-This repository is released for academic research purposes only.
-
-Please check the licenses and usage agreements of the original datasets before using them. The datasets are not redistributed in this repository.
-
-If you use this code, please cite the corresponding paper and follow the dataset license requirements.
-
-## Acknowledgement
-
-We thank the providers of the SEED and SEED-IV datasets and the open-source community for supporting reproducible research in affective computing and brain-computer interfaces.

@@ -1,289 +1,293 @@
+"""Leakage-safe command-line training entry point for HADUA."""
+
+from __future__ import annotations
+
 import argparse
-import os
-import utils
+import json
+import random
+from pathlib import Path
+from typing import Iterable
+
 import numpy as np
 import torch
-from get_dataset import get_dataset
-from load_data2 import load_data
-# from load_data2_multi_eeg import create_domain_loaders
-from load_data2_multi_eye import create_domain_loaders
-import math
-import torch
-import SDA_DDA
-import SDA_DDA_2
-import SDA_DDA_3
-import torch.nn as nn
-import random
-import torch.nn.functional as F
-from torch.nn import init
-# import pandas as pd
-from sklearn.metrics import confusion_matrix, f1_score, roc_auc_score, precision_score
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    roc_auc_score,
+)
+from torch import nn
 
-# pd.set_option('display.max_rows', None)  # 显示全部行
-# pd.set_option('display.max_columns', None)  # 显示全部列
-np.set_printoptions(threshold=np.inf)
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-# torch.cuda.set_device(-1)
-cuda = torch.cuda.is_available()
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-log = []
-
-# Command setting
-parser = argparse.ArgumentParser(description='DDC_DCORAL')
-parser.add_argument('--model', type=str, default='CFE')
-parser.add_argument('--batchsize', type=int, default=256)
-# parser.add_argument('--src', type=str, default='amazon')
-# parser.add_argument('--tar', type=str, default='webcam')
-parser.add_argument('--n_class', type=int, default=3)
-parser.add_argument('--lr', type=float, default=0.05)
-parser.add_argument('--n_epoch', type=int, default=200)
-parser.add_argument('--momentum', type=float, default=0.9)
-parser.add_argument('--decay', type=float, default=5e-4)
-parser.add_argument('--early_stop', type=int, default=20)
-parser.add_argument('--lamb', type=float, default=0.5)
-parser.add_argument('--trans_loss', type=str, default='mmd')
-parser.add_argument('--gamma', type=int, default=1,
-                    help='the fc layer and the sharenet have different or same learning rate')
-args = parser.parse_args(args=[])
+from SDA_DDA_3 import HADUA
+from load_data2_multi_eye import create_domain_loaders, create_evaluation_loader
 
 
-def setup_seed(seed):  ## setup the random seed
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train HADUA with LOSO transductive UDA")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        required=True,
+        help="directory containing EEG/, EYE/, and Label/ preprocessed arrays",
+    )
+    parser.add_argument(
+        "--subjects",
+        default="1,2,3,4,5,8,9,10,11,12,13,14",
+        help="comma-separated subject file stems",
+    )
+    parser.add_argument(
+        "--target-subject",
+        default=None,
+        help="run only one target; by default every listed subject is held out once",
+    )
+    parser.add_argument("--num-classes", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=5e-5)
+    parser.add_argument("--gamma-mmd", type=float, default=0.5)
+    parser.add_argument("--gamma-cmmd", type=float, default=0.5)
+    parser.add_argument("--hidden-dim", type=int, default=128)
+    parser.add_argument("--num-heads", type=int, default=16)
+    parser.add_argument("--gaussian-momentum", type=float, default=0.999)
+    parser.add_argument("--gaussian-initial-variance", type=float, default=1.0)
+    parser.add_argument("--ua-temperature", type=float, default=1.0)
+    parser.add_argument("--ua-strength", type=float, default=0.3)
+    parser.add_argument("--ua-midpoint", type=float, default=20.0)
+    parser.add_argument("--ua-slope", type=float, default=6.0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--device", default="auto", help="auto, cpu, cuda, or an explicit torch device"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("outputs"),
+        help="directory for aggregate JSON metrics",
+    )
+    return parser.parse_args(argv)
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
-    np.random.seed(seed)  # Numpy module.
-    random.seed(seed)  # Python random module.
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+        torch.cuda.manual_seed_all(seed)
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
 
 
-def weigth_init(m):  ## model parameter initialization
-    if isinstance(m, nn.Conv2d):
-        init.xavier_uniform_(m.weight.data)
-        init.constant_(m.bias.data, 0.3)
-    elif isinstance(m, nn.BatchNorm2d):
-        m.weight.data.fill_(1)
-        m.bias.data.zero_()
-    elif isinstance(m, nn.BatchNorm1d):
-        m.weight.data.fill_(1)
-        m.bias.data.zero_()
-    elif isinstance(m, nn.Linear):
-        m.weight.data.normal_(0, 0.03)
-        m.bias.data.zero_()
+def resolve_device(requested: str) -> torch.device:
+    if requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(requested)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is unavailable")
+    return device
 
 
-def segmented_function(epoch):
-    if epoch <= 10:
-        value = 1
-    elif 10 < epoch <= 40:
-        # 在10-30之间逐渐减小值，你可以根据需要调整
-        value = 2 / (1 + math.exp(-10 * (args.n_epoch) / args.n_epoch)) - 1
-    elif 40 < epoch <= 85:
-        # 在10-30之间逐渐减小值，你可以根据需要调整
-        value = 1 * np.exp(-0.6 * epoch)
-    else:
-        value = 0.01
-    return value
+def build_model(args: argparse.Namespace) -> HADUA:
+    return HADUA(
+        num_class=args.num_classes,
+        num_hiddens=args.hidden_dim,
+        num_heads=args.num_heads,
+        gaussian_momentum=args.gaussian_momentum,
+        gaussian_initial_variance=args.gaussian_initial_variance,
+        ua_temperature=args.ua_temperature,
+        ua_strength=args.ua_strength,
+        ua_midpoint=args.ua_midpoint,
+        ua_slope=args.ua_slope,
+    )
 
 
-def segmented_function_1(epoch):
-    if epoch <= 40:
-        value = 0.65
-    else:
-        value = 1
-    return value
-
-
-def tt(model, target_test_loader):
-    model.eval()
-    correct = 0
-    len_target_dataset = len(target_test_loader.dataset)
-    num_classes = args.n_class
-    conf_matrix = np.zeros((num_classes, num_classes))
-    all_preds = []
-    all_targets = []
-    all_probs = []  # For AUC calculation
-
-    with torch.no_grad():
-        for data, target in target_test_loader:
-            data, target = data.to(DEVICE), target.to(DEVICE)
-            s_output = model.predict(data)
-            probs = F.softmax(s_output, dim=1)  # Get softmax probabilities for AUC
-            pred = torch.max(s_output, 1)[1]
-            target = torch.argmax(target, dim=1)
-
-            correct += torch.sum(pred == target)
-            conf_matrix += confusion_matrix(target.cpu().numpy(), pred.cpu().numpy(), labels=np.arange(num_classes))
-
-            # Collect predictions, targets, and probabilities
-            all_preds.extend(pred.cpu().numpy())
-            all_targets.extend(target.cpu().numpy())
-            all_probs.extend(probs.cpu().numpy())
-
-    # Calculate accuracy
-    acc = 100. * correct / len_target_dataset
-
-    # Calculate additional metrics
-    precision = precision_score(all_targets, all_preds, average='weighted', zero_division=0)
-    f1 = f1_score(all_targets, all_preds, average='weighted', zero_division=0)
-
-    # Calculate AUC (multi-class, one-vs-rest)
-    try:
-        auc = roc_auc_score(all_targets, np.array(all_probs), multi_class='ovr')
-    except ValueError:
-        auc = 0.0  # Handle cases where AUC cannot be computed
-
-    return acc, pred, conf_matrix, precision, f1, auc
-
-
-def train(source_loader, target_train_loader, target_test_loader, model, optimizer):
-    len_source_loader = len(source_loader)
-    len_target_loader = len(target_train_loader)
-
-    # Train for a fixed number of epochs without evaluating target labels.
-    for e in range(args.n_epoch):
-        train_loss_clf = utils.AverageMeter()
-        train_loss_transfer = utils.AverageMeter()
-        train_loss_cmmd_loss = utils.AverageMeter()
-        train_loss_total = utils.AverageMeter()
+def train_fixed_epochs(
+    model: HADUA,
+    source_loader: torch.utils.data.DataLoader,
+    target_loader: torch.utils.data.DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    epochs: int,
+    gamma_mmd: float,
+    gamma_cmmd: float,
+) -> list[dict[str, float]]:
+    """Train without reading target labels or target evaluation metrics."""
+    criterion = nn.CrossEntropyLoss()
+    history: list[dict[str, float]] = []
+    for epoch in range(epochs):
         model.train()
-        iter_source, iter_target = iter(source_loader), iter(target_train_loader)
-        n_batch = min(len_source_loader, len_target_loader)
+        target_iterator = iter(target_loader)
+        totals = {"classification": 0.0, "mmd": 0.0, "cmmd": 0.0, "total": 0.0}
+        samples = 0
+        for source_features, source_labels in source_loader:
+            try:
+                (target_features,) = next(target_iterator)
+            except StopIteration:
+                target_iterator = iter(target_loader)
+                (target_features,) = next(target_iterator)
 
-        criterion = torch.nn.CrossEntropyLoss()
-        for mlen in range(n_batch):
-            data_source, label_source = next(iter_source)
-            data_target, _ = next(iter_target)
-            if mlen % len(target_train_loader) == 0:
-                iter_target = iter(target_train_loader)
-            if cuda:
-                data_source, label_source = data_source.cuda(), label_source.cuda()
-                data_target = data_target.cuda()
-
-            data_source, label_source = data_source.to(DEVICE), label_source.to(DEVICE)
-            data_target = data_target.to(DEVICE)
-
-            optimizer.zero_grad()
-            label_source_pred, transfer_loss, cmmd_loss = model(
-                e, data_source, data_target, label_source
+            source_features = source_features.to(device)
+            source_labels = source_labels.to(device)
+            target_features = target_features.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            logits, mmd_loss, cmmd_loss = model(
+                epoch, source_features, target_features, source_labels
             )
-
-            clf_loss = criterion(label_source_pred, label_source.float())
-
-            if args.gamma == 1:
-                gamma = 2 / (1 + math.exp(-10 * (args.n_epoch) / args.n_epoch)) - 1
-            if args.gamma == 2:
-                gamma = args.n_epoch / args.n_epoch
-
-            beta = segmented_function(e)
-            beta_1 = segmented_function_1(e)
-
-            # Set the CMMD weight according to the source classification loss.
-            if clf_loss <= 0.1:
-                cmmd_weight = 1
-            elif 0.1 < clf_loss < 0.15:
-                cmmd_weight = 0.5
-            else:
-                cmmd_weight = 0
-
-            # loss = clf_loss + beta * transfer_loss + cmmd_weight * cmmd_loss
-            loss = clf_loss + transfer_loss
-
-            loss.backward()
+            classification_loss = criterion(logits, source_labels)
+            total_loss = (
+                classification_loss
+                + gamma_mmd * mmd_loss
+                + gamma_cmmd * cmmd_loss
+            )
+            total_loss.backward()
             optimizer.step()
-            train_loss_clf.update(clf_loss.item())
-            train_loss_transfer.update(transfer_loss.item())
-            train_loss_cmmd_loss.update(cmmd_loss.item())
-            train_loss_total.update(loss.item())
 
-        log.append([
-            train_loss_clf.avg,
-            train_loss_transfer.avg,
-            train_loss_cmmd_loss.avg,
-            train_loss_total.avg
-        ])
+            batch_size = source_features.shape[0]
+            samples += batch_size
+            totals["classification"] += classification_loss.item() * batch_size
+            totals["mmd"] += mmd_loss.item() * batch_size
+            totals["cmmd"] += cmmd_loss.item() * batch_size
+            totals["total"] += total_loss.item() * batch_size
 
-    np_log = np.array(log, dtype=float)
-    np.savetxt(
-        'F:\\Emotion_datasets\\SEED\\train_log.csv',
-        np_log,
-        delimiter=',',
-        fmt='%.6f'
-    )
-
-    # Evaluate the target domain once after fixed-epoch training.
-    acc, pred, conf_matrix, precision, f1, auc = tt(
-        model, target_test_loader
-    )
-
-    print('Transfer result: Acc: {:.4f}, Precision: {:.4f}, F1: {:.4f}, AUC: {:.4f}'.format(
-        acc, precision, f1, auc))
-    print('Confusion Matrix:\n', conf_matrix)
-    return acc, conf_matrix, precision, f1, auc
+        epoch_metrics = {name: value / samples for name, value in totals.items()}
+        epoch_metrics["epoch"] = float(epoch + 1)
+        history.append(epoch_metrics)
+        print(
+            f"epoch {epoch + 1:03d}/{epochs:03d} "
+            f"cls={epoch_metrics['classification']:.6f} "
+            f"mmd={epoch_metrics['mmd']:.6f} "
+            f"cmmd={epoch_metrics['cmmd']:.6f} "
+            f"total={epoch_metrics['total']:.6f}"
+        )
+    return history
 
 
-if __name__ == '__main__':
-    all_test_results = []
-    all_matrix = []
-    all_precision = []
-    all_f1 = []
-    all_auc = []
+@torch.no_grad()
+def evaluate_once(
+    model: HADUA,
+    evaluation_loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    num_classes: int,
+) -> dict[str, object]:
+    """Read target labels once, after optimization and model selection are over."""
+    model.eval()
+    labels: list[np.ndarray] = []
+    predictions: list[np.ndarray] = []
+    probabilities: list[np.ndarray] = []
+    for features, batch_labels in evaluation_loader:
+        logits = model.predict(features.to(device))
+        batch_probabilities = torch.softmax(logits, dim=1)
+        labels.append(batch_labels.numpy())
+        predictions.append(batch_probabilities.argmax(dim=1).cpu().numpy())
+        probabilities.append(batch_probabilities.cpu().numpy())
+    target = np.concatenate(labels)
+    predicted = np.concatenate(predictions)
+    probability = np.concatenate(probabilities)
+    try:
+        auc = float(
+            roc_auc_score(
+                target,
+                probability,
+                labels=np.arange(num_classes),
+                average="macro",
+                multi_class="ovr",
+            )
+        )
+    except ValueError:
+        auc = float("nan")
+    return {
+        "accuracy": float(accuracy_score(target, predicted) * 100.0),
+        "macro_precision": float(
+            precision_score(target, predicted, average="macro", zero_division=0)
+        ),
+        "macro_f1": float(f1_score(target, predicted, average="macro", zero_division=0)),
+        "macro_auc": auc,
+        "confusion_matrix": confusion_matrix(
+            target, predicted, labels=np.arange(num_classes)
+        ).tolist(),
+    }
 
-    for test_id in range(1, 13):  # 12 subjects
-        print(f"\nProcessing test_id: {test_id}")
-        torch.manual_seed(0)
-        SESSION = 1
-        batch_size = 128
-        source_loader, target_train_loader, target_test_loader = create_domain_loaders(test_id, batch_size)
 
-        model = SDA_DDA_3.Transfer_Net(
-            args.n_class,
-            transfer_loss=args.trans_loss,
-            base_net=args.model,
-            base_net_eye='CFE_eye',
-            num_hiddens=128,
-            num_heads=16
-        ).to(DEVICE)
+def aggregate(results: list[dict[str, object]]) -> dict[str, dict[str, float]]:
+    summary: dict[str, dict[str, float]] = {}
+    for metric in ("accuracy", "macro_precision", "macro_f1", "macro_auc"):
+        values = np.asarray([result[metric] for result in results], dtype=float)
+        summary[metric] = {
+            "mean": float(np.nanmean(values)),
+            "std": float(np.nanstd(values, ddof=1 if values.size > 1 else 0)),
+        }
+    return summary
 
-        optimizer = torch.optim.Adam([
-            {'params': model.base_network.parameters(), 'lr': args.lr * 0.1},
-            {'params': model.base_network_eye.parameters(), 'lr': args.lr * 0.1},
-            {'params': model.self_attention_eeg.parameters(), 'lr': args.lr},
-            {'params': model.self_attention_eye.parameters(), 'lr': args.lr},
-            {'params': model.cross_attention.parameters(), 'lr': args.lr},
-        ], lr=args.lr, weight_decay=1e-3)
 
-        transfer_results, matrix, precision, f1, auc = train(source_loader, target_train_loader, target_test_loader,
-                                                             model, optimizer)
-        all_test_results.append(transfer_results)
-        all_matrix.append(matrix)
-        all_precision.append(precision)
-        all_f1.append(f1)
-        all_auc.append(auc)
+def main(argv: Iterable[str] | None = None) -> int:
+    args = parse_args(argv)
+    subjects = [value.strip() for value in args.subjects.split(",") if value.strip()]
+    targets = [args.target_subject] if args.target_subject else subjects
+    if any(target not in subjects for target in targets):
+        raise ValueError("every target subject must occur in --subjects")
+    device = resolve_device(args.device)
+    all_results: list[dict[str, object]] = []
 
-    # Aggregate results
-    stacked_results = torch.tensor(all_test_results)
-    average_result = torch.mean(stacked_results)
-    std_result = torch.std(stacked_results)
-    avg_precision = np.mean(all_precision)
-    std_precision = np.std(all_precision)
-    avg_f1 = np.mean(all_f1)
-    std_f1 = np.std(all_f1)
-    avg_auc = np.mean(all_auc)
-    std_auc = np.std(all_auc)
-    avg_conf_matrix = sum(all_matrix) / len(all_matrix)
+    for run_index, target_subject in enumerate(targets):
+        print(f"\nTarget subject: {target_subject}")
+        set_seed(args.seed + run_index)
+        source_loader, adaptation_loader = create_domain_loaders(
+            args.data_root,
+            target_subject,
+            subjects,
+            args.batch_size,
+            seed=args.seed + run_index,
+            num_workers=args.num_workers,
+        )
+        model = build_model(args).to(device)
+        # All trainable modules, including the classifier, are optimized.
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+        history = train_fixed_epochs(
+            model,
+            source_loader,
+            adaptation_loader,
+            optimizer,
+            device,
+            args.epochs,
+            args.gamma_mmd,
+            args.gamma_cmmd,
+        )
+        # Target labels are not read from disk until all parameter updates end.
+        evaluation_loader = create_evaluation_loader(
+            args.data_root,
+            target_subject,
+            args.batch_size,
+            num_workers=args.num_workers,
+        )
+        result = evaluate_once(model, evaluation_loader, device, args.num_classes)
+        result["target_subject"] = target_subject
+        result["final_training_loss"] = history[-1]
+        all_results.append(result)
+        print(
+            f"final target evaluation: accuracy={result['accuracy']:.4f}, "
+            f"macro_f1={result['macro_f1']:.4f}, macro_auc={result['macro_auc']:.4f}"
+        )
 
-    # Print results
-    print("\nFinal Results:")
-    print(f"Average Accuracy: {average_result:.4f} ± {std_result:.4f}")
-    print(f"Average Precision: {avg_precision:.4f} ± {std_precision:.4f}")
-    print(f"Average F1-Score: {avg_f1:.4f} ± {std_f1:.4f}")
-    print(f"Average AUC: {avg_auc:.4f} ± {std_auc:.4f}")
-    print("All Accuracies:", stacked_results.tolist())
-    print("Average Confusion Matrix:\n", avg_conf_matrix)
+    payload = {
+        "protocol": "LOSO transductive UDA; fixed-epoch training; one final target evaluation",
+        "subjects": subjects,
+        "results": all_results,
+        "summary": aggregate(all_results),
+    }
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = args.output_dir / "results.json"
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=True) + "\n")
+    print(f"\nSaved metrics to {output_path}")
+    print(json.dumps(payload["summary"], indent=2))
+    return 0
 
-    # Calculate percentage confusion matrix
-    row_sums = avg_conf_matrix.sum(axis=1, keepdims=True)
-    percentage_conf_matrix = (avg_conf_matrix / row_sums) * 100
-    print("Percentage Confusion Matrix:\n", percentage_conf_matrix)
+
+if __name__ == "__main__":
+    raise SystemExit(main())

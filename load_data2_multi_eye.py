@@ -1,141 +1,146 @@
+"""Leakage-safe loading for preprocessed EEG and eye-movement features."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Sequence
+
 import numpy as np
 import torch
-from torch.utils import data as Data
+from torch.utils.data import DataLoader, TensorDataset
 
-def create_domain_loaders(test_id, BATCH_SIZE):
-    EEG_FOLDER = "F:\\Emotion_datasets\\SEED\\multi-mode\\contact\\EEG"
-    LABEL_FOLDER = "F:\\Emotion_datasets\\SEED\\multi-mode\\contact\\Label"
-    EYE_FOLDER = "F:\\Emotion_datasets\\SEED\\multi-mode\\contact\\EYE"  # 眼动数据路径
 
-    feature_list = []
-    label_list = []
-    eye_feature_list = []  # 存储眼动数据
-    subject_ids = [i for i in range(1, 15) if i not in [6, 7]]  # 跳过 6 和 7，得到 [1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14]
+def _class_indices(labels: np.ndarray) -> np.ndarray:
+    if labels.ndim == 2 and labels.shape[1] > 1:
+        labels = labels.argmax(axis=1)
+    else:
+        labels = labels.reshape(-1)
+    if not np.issubdtype(labels.dtype, np.integer):
+        if not np.allclose(labels, np.round(labels)):
+            raise ValueError("labels must be integer indices or one-hot vectors")
+        labels = np.round(labels)
+    return labels.astype(np.int64, copy=False)
 
-    for subject_id in subject_ids:
-        # 加载脑电特征（EEG）
-        eeg_path = f"{EEG_FOLDER}\\{subject_id}.npy"
-        features = np.load(eeg_path)
 
-        # 加载标签
-        label_path = f"{LABEL_FOLDER}\\{subject_id}.npy"  # 假设标签文件也以 .npy 格式存储
-        labels = np.load(label_path)
+def _paths(data_root: str | Path, subject_id: str | int) -> dict[str, Path]:
+    root = Path(data_root).expanduser()
+    name = f"{subject_id}.npy"
+    return {
+        "EEG": root / "EEG" / name,
+        "EYE": root / "EYE" / name,
+        "Label": root / "Label" / name,
+    }
 
-        # 加载眼动数据
-        eye_path = f"{EYE_FOLDER}\\{subject_id}.npy"
-        eye_features = np.load(eye_path)  # 读取眼动数据
 
-        feature_list.append(features)
-        label_list.append(labels)
-        eye_feature_list.append(eye_features)  # 存储眼动数据
+def load_features(
+    data_root: str | Path, subject_id: str | int
+) -> np.ndarray:
+    """Load and concatenate one subject's EEG and eye features."""
+    paths = _paths(data_root, subject_id)
+    missing = [str(paths[key]) for key in ("EEG", "EYE") if not paths[key].is_file()]
+    if missing:
+        raise FileNotFoundError("missing preprocessed subject files: " + ", ".join(missing))
+    eeg = np.load(paths["EEG"], allow_pickle=False)
+    eye = np.load(paths["EYE"], allow_pickle=False)
+    if eeg.ndim != 2 or eeg.shape[1] != 310:
+        raise ValueError(f"{paths['EEG']} must have shape [samples, 310]")
+    if eye.ndim != 2 or eye.shape[1] != 33:
+        raise ValueError(f"{paths['EYE']} must have shape [samples, 33]")
+    if eeg.shape[0] != eye.shape[0]:
+        raise ValueError(f"sample counts do not match for subject {subject_id}")
+    return np.concatenate((eeg.astype(np.float32), eye.astype(np.float32)), axis=1)
 
+
+def load_labels(data_root: str | Path, subject_id: str | int) -> np.ndarray:
+    path = _paths(data_root, subject_id)["Label"]
+    if not path.is_file():
+        raise FileNotFoundError(f"missing preprocessed label file: {path}")
+    return _class_indices(np.load(path, allow_pickle=False))
+
+
+def create_domain_loaders(
+    data_root: str | Path,
+    target_subject: str | int,
+    subject_ids: Sequence[str | int],
+    batch_size: int,
+    *,
+    seed: int = 0,
+    num_workers: int = 0,
+) -> tuple[DataLoader, DataLoader]:
+    """Create LOSO source and unlabeled-target adaptation loaders.
+
+    Target adaptation batches contain a one-element tuple ``(features,)``. They
+    never expose or load target labels.
     """
-    为给定的 test_id 创建源域和目标域的 DataLoader
-    test_id: 目标域被试的 ID（1到12，映射到原始的1,2,3,4,5,8,9,10,11,12,13,14）
-    """
-    # 调整 test_id 到实际的被试索引
-    subject_ids = [i for i in range(1, 15) if i not in [6, 7]]  # [1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14]
-    actual_subject_id = subject_ids[test_id - 1]  # 将 1-12 映射到实际的被试 ID
+    if batch_size < 2:
+        raise ValueError("batch_size must be at least 2 because the backbone uses batch norm")
+    normalized_ids = [str(subject_id) for subject_id in subject_ids]
+    target_id = str(target_subject)
+    if target_id not in normalized_ids:
+        raise ValueError("target_subject must be included in subject_ids")
+    if len(set(normalized_ids)) != len(normalized_ids):
+        raise ValueError("subject_ids must be unique")
+    if len(normalized_ids) < 2:
+        raise ValueError("LOSO adaptation requires at least two subjects")
 
-    # 目标域数据
-    target_feature, target_label, target_eye_feature = feature_list[test_id - 1], label_list[test_id - 1], eye_feature_list[test_id - 1]
+    source_features: list[np.ndarray] = []
+    source_labels: list[np.ndarray] = []
+    target_features: np.ndarray | None = None
+    for subject_id in normalized_ids:
+        combined = load_features(data_root, subject_id)
+        if subject_id == target_id:
+            target_features = combined
+        else:
+            source_features.append(combined)
+            labels = load_labels(data_root, subject_id)
+            if labels.shape[0] != combined.shape[0]:
+                raise ValueError(f"sample counts do not match for subject {subject_id}")
+            source_labels.append(labels)
 
-    # 移除目标域数据，剩余为源域数据
-    feature_list_copy = feature_list.copy()
-    label_list_copy = label_list.copy()
-    eye_feature_list_copy = eye_feature_list.copy()
-    del feature_list_copy[test_id - 1]
-    del label_list_copy[test_id - 1]
-    del eye_feature_list_copy[test_id - 1]
+    assert target_features is not None
+    source_tensor = torch.from_numpy(np.concatenate(source_features, axis=0))
+    source_label_tensor = torch.from_numpy(np.concatenate(source_labels, axis=0))
+    target_tensor = torch.from_numpy(target_features)
+    if source_tensor.shape[0] < batch_size or target_tensor.shape[0] < batch_size:
+        raise ValueError("each domain must contain at least one full training batch")
 
-    # 合并源域数据
-    source_data = np.vstack(feature_list_copy)
-    source_label = np.vstack(label_list_copy)
-    source_eye_data = np.vstack(eye_feature_list_copy)  # 合并源域的眼动数据
-
-    # 打印目标域特征形状（用于调试）
-    print('target_feature.shape', target_feature.shape)
-    print('target_eye_feature.shape', target_eye_feature.shape)
-
-    # Transductive UDA uses target features during adaptation, but not target labels.
-    target_train_data, target_train_eye_data = target_feature, target_eye_feature
-    target_test_data, target_test_label, target_test_eye_data = target_feature, target_label, target_eye_feature
-    target_train_placeholder = np.zeros_like(target_label)
-
-    # 合并EEG数据和眼动数据（按axis=1拼接）
-    source_data_combined = np.concatenate([source_data, source_eye_data], axis=1)
-    target_train_data_combined = np.concatenate([target_train_data, target_train_eye_data], axis=1)
-    target_test_data_combined = np.concatenate([target_test_data, target_test_eye_data], axis=1)
-
-    # 转换为 PyTorch Tensor 并创建 DataLoader
-    torch_dataset_source = Data.TensorDataset(
-        torch.from_numpy(source_data_combined).float(),  # 确保数据类型为 float
-        torch.from_numpy(source_label).long()  # 确保标签类型为 long
-    )
-
-    torch_dataset_target_train = Data.TensorDataset(
-        torch.from_numpy(target_train_data_combined).float(),
-        torch.from_numpy(target_train_placeholder).long()
-    )
-
-    torch_dataset_target_test = Data.TensorDataset(
-        torch.from_numpy(target_test_data_combined).float(),
-        torch.from_numpy(target_test_label).long()
-    )
-
-    # 创建 DataLoader
-    source_loader = Data.DataLoader(
-        dataset=torch_dataset_source,
-        batch_size=BATCH_SIZE,
+    source_generator = torch.Generator().manual_seed(seed)
+    target_generator = torch.Generator().manual_seed(seed + 1)
+    source_loader = DataLoader(
+        TensorDataset(source_tensor, source_label_tensor),
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=0,
-        drop_last=True
+        drop_last=True,
+        num_workers=num_workers,
+        generator=source_generator,
     )
-
-    target_train_loader = Data.DataLoader(
-        dataset=torch_dataset_target_train,
-        batch_size=BATCH_SIZE,
+    target_adaptation_loader = DataLoader(
+        TensorDataset(target_tensor),
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=0,
-        drop_last=True
+        drop_last=True,
+        num_workers=num_workers,
+        generator=target_generator,
     )
+    return source_loader, target_adaptation_loader
 
-    target_test_loader = Data.DataLoader(
-        dataset=torch_dataset_target_test,
-        batch_size=target_test_data_combined.shape[0],  # 目标测试集使用完整数据
-        shuffle=False,  # 测试集通常不打乱
-        num_workers=0,
-        drop_last=False  # 测试集不丢弃最后一批
+
+def create_evaluation_loader(
+    data_root: str | Path,
+    target_subject: str | int,
+    batch_size: int,
+    *,
+    num_workers: int = 0,
+) -> DataLoader:
+    """Load target labels only after training has irreversibly finished."""
+    target_features = load_features(data_root, target_subject)
+    target_labels = load_labels(data_root, target_subject)
+    if target_features.shape[0] != target_labels.shape[0]:
+        raise ValueError(f"sample counts do not match for subject {target_subject}")
+    return DataLoader(
+        TensorDataset(torch.from_numpy(target_features), torch.from_numpy(target_labels)),
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=num_workers,
     )
-
-    return source_loader, target_train_loader, target_test_loader
-
-# if __name__ == "__main__":
-#     # 依次让每个被试作为目标域（现在是12个被试）
-#     for test_id in range(1, 13):  # 调整为12个被试
-#         print(f"\nProcessing test_id: {test_id}")
-#
-#         # 获取数据加载器
-#         source_loader, target_train_loader, target_test_loader = create_domain_loaders(test_id, 32)
-#
-#         # 打印源域训练数据的批次大小和形状
-#         print("Source Loader - First Batch:")
-#         for data, labels in source_loader:
-#             print(f"Data shape: {data.shape}, Labels shape: {labels.shape}")
-#             break  # 只查看第一个批次
-#
-#         # 打印目标域训练数据的批次大小和形状
-#         print("Target Train Loader - First Batch:")
-#         for data, labels in target_train_loader:
-#             print(f"Data shape: {data.shape}, Labels shape: {labels.shape}")
-#             break  # 只查看第一个批次
-#
-#         # 打印目标域测试数据的批次大小和形状
-#         print("Target Test Loader - First Batch:")
-#         for data, labels in target_test_loader:
-#             print(f"Data shape: {data.shape}, Labels shape: {labels.shape}")
-#             break  # 只查看第一个批次
-#
-#         print(f"Finished processing test_id: {test_id}")
-#
-#     print("\nAll test_id processing completed.")

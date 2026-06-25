@@ -1,95 +1,75 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Sun Nov 19 10:14:18 2023
+"""Confidence-weighted conditional maximum mean discrepancy."""
 
-@author: Administrator
-"""
+from __future__ import annotations
 
 import torch
-import numpy as np
-from torch.autograd import Variable
 
-min_var_est = 1e-8
-
-def guassian_kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
-    n_samples = int(source.size()[0]) + int(target.size()[0])
-    total = torch.cat([source, target], dim=0)
-    total0 = total.unsqueeze(0).expand(int(total.size(0)), int(total.size(0)), int(total.size(1)))
-    total1 = total.unsqueeze(1).expand(int(total.size(0)), int(total.size(0)), int(total.size(1)))
-    L2_distance = ((total0 - total1) ** 2).sum(2)
-    if fix_sigma:
-        bandwidth = fix_sigma
-    else:
-        bandwidth = torch.sum(L2_distance.data) / (n_samples ** 2 - n_samples)
-    bandwidth /= kernel_mul ** (kernel_num // 2)
-    bandwidth_list = [bandwidth * (kernel_mul ** i) for i in range(kernel_num)]
-    kernel_val = [torch.exp(-L2_distance / bandwidth_temp) for bandwidth_temp in bandwidth_list]
-    return sum(kernel_val)  # /len(kernel_val)
-def cmmd(source, target, s_label, t_label, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
-    s_label = s_label.cpu()
-
-    # s_label = torch.argmax(s_label).item()
-    # s_label = [s_label.index(1) for one_hot in s_label]
-    s_label = s_label.view(-1, 1)
-    s_label = s_label.to(torch.int64)
-    s_label = torch.zeros(s_label.shape[0], 3).scatter_(1, s_label.data, 1)
-    s_label = Variable(s_label).cuda()
-
-    t_label = t_label.cpu()
-    t_label = t_label.view(-1, 1)
-    t_label = torch.zeros(t_label.shape[0], 3).scatter_(1, t_label.data, 1)
-    t_label = Variable(t_label).cuda()
-
-    batch_size_s = int(s_label.size()[0])
-    batch_size_t = int(t_label.size()[0])
-    kernels = guassian_kernel(source, target,
-                              kernel_mul=kernel_mul, kernel_num=kernel_num, fix_sigma=fix_sigma)
-    loss = 0
-    # 提取相似性矩阵
-    XX = kernels[:batch_size_s, :batch_size_s]
-
-    # 检查目标域是否为空
-    if batch_size_t == 0:
-        # 如果目标域为空，直接计算源域的损失
-        loss = torch.mean(torch.mm(s_label, torch.transpose(s_label, 0, 1)) * XX)
-    else:
-        # 如果目标域不为空，按照之前的流程进行计算
-        YY = kernels[batch_size_s:, batch_size_s:]
-        XY = kernels[:batch_size_s, batch_size_s:]
-        YX = kernels[batch_size_s:, :batch_size_s]
-
-        loss_XX = torch.mean(torch.mm(s_label, torch.transpose(s_label, 0, 1)) * XX)
-        loss_YY = torch.mean(torch.mm(t_label, torch.transpose(t_label, 0, 1)) * YY)
-        loss_XY = torch.mean(torch.mm(s_label, torch.transpose(t_label, 0, 1)) * XY)
-        loss_YX = torch.mean(torch.mm(t_label, torch.transpose(s_label, 0, 1)) * YX)
-        
-        loss += loss_XX + loss_YY - loss_XY - loss_YX
-
-    loss /= 3
-
-    return loss
+from mmd import gaussian_kernel
 
 
-# # 随机生成源域数据和目标域数据
-# source_data = torch.randn(10, 50)  # 假设源域数据维度为 (100, 50)
-# target_data = torch.randn(10, 50)   # 假设目标域数据维度为 (50, 50)
-#
-# # 随机生成源域真实标签和目标域伪标签
-# source_labels = torch.randint(0, 2, (10,))  # 二分类任务
-# target_pseudo_labels = torch.randint(0, 2, (10,))  # 随机生成目标域伪标签
-#
-# # 随机生成置信度，这里假设置信度在 [0, 1] 之间
-# confidence_threshold = torch.tensor([0.99])
-#
-# # 置信度判断，选择高于置信度阈值的目标域数据
-# confidence_mask = torch.rand(target_data.size(0)) > confidence_threshold
-# confident_target_data = target_data[confidence_mask]
-# confident_target_pseudo_labels = target_pseudo_labels[confidence_mask]
-# source, target, s_label, t_label = source_data, confident_target_data, source_labels, confident_target_pseudo_labels
-# kernel_mul=2.0
-# kernel_num=5
-# fix_sigma=None
-#
-# loss = cmmd(source_data, confident_target_data, source_labels, confident_target_pseudo_labels)
-#
-# print("CMMD Loss:", loss.item())
+def cmmd(
+    source: torch.Tensor,
+    target: torch.Tensor,
+    source_labels: torch.Tensor,
+    target_probabilities: torch.Tensor,
+    weights: torch.Tensor | None = None,
+    kernel_mul: float = 2.0,
+    kernel_num: int = 5,
+    fix_sigma: float | None = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Average class-wise RKHS centroid distance.
+
+    ``source_labels`` and ``target_probabilities`` are soft class assignments.
+    Target confidence weights affect only target class centroids. The caller is
+    responsible for applying the global CMMD coefficient exactly once.
+    """
+    if target.shape[0] == 0:
+        return source.sum() * 0.0
+    if source_labels.ndim != 2 or target_probabilities.ndim != 2:
+        raise ValueError("source labels and target probabilities must be matrices")
+    if source_labels.shape[0] != source.shape[0]:
+        raise ValueError("source label count does not match source features")
+    if target_probabilities.shape[0] != target.shape[0]:
+        raise ValueError("target probability count does not match target features")
+    if source_labels.shape[1] != target_probabilities.shape[1]:
+        raise ValueError("source and target class counts do not match")
+
+    source_labels = source_labels.to(dtype=source.dtype)
+    target_probabilities = target_probabilities.to(dtype=target.dtype)
+    if weights is None:
+        weights = torch.ones(target.shape[0], dtype=target.dtype, device=target.device)
+    if weights.ndim != 1 or weights.shape[0] != target.shape[0]:
+        raise ValueError("weights must have one value per target sample")
+    weighted_target = target_probabilities * weights.to(target.dtype).unsqueeze(1)
+
+    kernels = gaussian_kernel(
+        source, target, kernel_mul=kernel_mul, kernel_num=kernel_num, fix_sigma=fix_sigma
+    )
+    source_count = source.shape[0]
+    xx = kernels[:source_count, :source_count]
+    yy = kernels[source_count:, source_count:]
+    xy = kernels[:source_count, source_count:]
+
+    losses: list[torch.Tensor] = []
+    for class_index in range(source_labels.shape[1]):
+        source_mass = source_labels[:, class_index]
+        target_mass = weighted_target[:, class_index]
+        source_total = source_mass.sum()
+        target_total = target_mass.sum()
+        # A mini-batch cannot estimate a source class centroid when that class
+        # is absent. Skipping it avoids a synthetic zero-centroid penalty.
+        if source_total.detach().item() <= eps or target_total.detach().item() <= eps:
+            continue
+        source_mass = source_mass / source_total.clamp_min(eps)
+        target_mass = target_mass / target_total.clamp_min(eps)
+        loss = (
+            source_mass @ xx @ source_mass
+            + target_mass @ yy @ target_mass
+            - 2.0 * (source_mass @ xy @ target_mass)
+        )
+        losses.append(loss)
+
+    if not losses:
+        return source.sum() * 0.0
+    return torch.stack(losses).mean().clamp_min(0.0)

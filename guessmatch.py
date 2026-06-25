@@ -1,51 +1,140 @@
+"""Stateful Soft Gaussian Weighting and Uniform Alignment."""
+
+from __future__ import annotations
+
+import math
+
 import torch
-import torch.nn.functional as F
-import numpy as np
+from torch import nn
 
-class MatchWeighting:
-    def __init__(self, num_classes, momentum=0.9, lambda_max=1.0, temperature=1.0):
+
+class MatchWeighting(nn.Module):
+    """Refine target probabilities and compute continuous confidence weights.
+
+    The running confidence and class-distribution statistics are buffers so they
+    persist across mini-batches, move with the model device, and are stored in
+    checkpoints. Statistics are estimated only from target predictions.
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        momentum: float = 0.999,
+        lambda_max: float = 1.0,
+        temperature: float = 1.0,
+        alignment_strength: float = 0.3,
+        alignment_midpoint: float = 20.0,
+        alignment_slope: float = 6.0,
+        initial_variance: float = 1.0,
+        eps: float = 1e-8,
+    ) -> None:
+        super().__init__()
+        if num_classes < 2:
+            raise ValueError("num_classes must be at least 2")
+        if not 0.0 <= momentum < 1.0:
+            raise ValueError("momentum must be in [0, 1)")
+        if initial_variance <= 0.0:
+            raise ValueError("initial_variance must be positive")
+        if temperature <= 0.0:
+            raise ValueError("temperature must be positive")
+        if not 0.0 <= alignment_strength <= 1.0:
+            raise ValueError("alignment_strength must be in [0, 1]")
+        if alignment_slope <= 0.0:
+            raise ValueError("alignment_slope must be positive")
+
         self.num_classes = num_classes
-        self.momentum = momentum  # EMA 的动量参数
+        self.momentum = momentum
         self.lambda_max = lambda_max
-        self.mu = 0.5
-        self.sigma = 1.0
-        # 初始化类别分布估计
-        self.class_dist = (torch.ones(num_classes) / num_classes).cuda()  # 初始均匀分布
-        self.alpha = 0.3  # 初始对齐强度
-        self.temperature = temperature  # 调整因子的温度参数
+        self.temperature = temperature
+        self.alignment_strength = alignment_strength
+        self.alignment_midpoint = alignment_midpoint
+        self.alignment_slope = alignment_slope
+        self.eps = eps
 
-    def update_gaussian_params(self, probabilities):
-        max_probs = torch.max(probabilities, dim=1)[0]
-        batch_mu = torch.mean(max_probs).item()
-        batch_sigma = torch.std(max_probs, unbiased=True).item()
-        self.mu = self.momentum * self.mu + (1 - self.momentum) * batch_mu
-        self.sigma = self.momentum * self.sigma + (1 - self.momentum) * max(batch_sigma, 1e-5)
-
-    def update_class_dist(self, probabilities):
-        """动态更新类别分布"""
-        batch_class_dist = torch.mean(probabilities, dim=0)  # 当前批次的类别分布
-        self.class_dist = self.momentum * self.class_dist + (1 - self.momentum) * batch_class_dist
-
-    def uniform_alignment(self, probabilities, current_epoch):
-        """优化后的 Uniform Alignment"""
-        # 使用 sigmoid 衰减调整对齐强度
-        effective_alpha = self.alpha / (1 + np.exp((current_epoch - 20) / 6))
-        uniform_dist = torch.ones(self.num_classes, device=probabilities.device) / self.num_classes
-        adjusted_dist = effective_alpha * uniform_dist + (1 - effective_alpha) * self.class_dist
-        # 增强调整因子，引入温度参数
-        adjust_factor = (adjusted_dist / (self.class_dist + 1e-8)) ** self.temperature
-        adjusted_probs = probabilities * adjust_factor
-        adjusted_probs = adjusted_probs / adjusted_probs.sum(dim=1, keepdim=True)
-        return adjusted_probs
-
-    def compute_weights(self, probabilities, current_epoch):
-        self.update_class_dist(probabilities)  # 更新类别分布
-        adjusted_probs = self.uniform_alignment(probabilities, current_epoch)
-        max_probs = torch.max(adjusted_probs, dim=1)[0]
-        self.update_gaussian_params(probabilities)
-        weights = torch.ones_like(max_probs) * self.lambda_max
-        mask = max_probs < self.mu
-        weights[mask] = self.lambda_max * torch.exp(
-            -((max_probs[mask] - self.mu) ** 2) / (2 * self.sigma ** 2)
+        self.register_buffer("confidence_mean", torch.tensor(1.0 / num_classes))
+        self.register_buffer("confidence_variance", torch.tensor(initial_variance))
+        self.register_buffer(
+            "class_distribution", torch.full((num_classes,), 1.0 / num_classes)
         )
-        return weights
+        self.register_buffer("num_updates", torch.tensor(0, dtype=torch.long))
+
+    @torch.no_grad()
+    def update_statistics(self, probabilities: torch.Tensor) -> None:
+        """Update EMA statistics from an unlabeled target mini-batch."""
+        self._validate_probabilities(probabilities)
+        detached = probabilities.detach()
+        confidence = detached.amax(dim=1)
+        batch_mean = confidence.mean()
+        # Equation (12) applies the B/(B-1) correction to the biased variance.
+        batch_variance = confidence.var(unbiased=False)
+        if confidence.numel() > 1:
+            batch_variance = batch_variance * confidence.numel() / (confidence.numel() - 1)
+        batch_distribution = detached.mean(dim=0)
+
+        one_minus_m = 1.0 - self.momentum
+        self.confidence_mean.mul_(self.momentum).add_(batch_mean, alpha=one_minus_m)
+        self.confidence_variance.mul_(self.momentum).add_(
+            batch_variance, alpha=one_minus_m
+        )
+        self.confidence_variance.clamp_(min=self.eps)
+        self.class_distribution.mul_(self.momentum).add_(
+            batch_distribution, alpha=one_minus_m
+        )
+        self.class_distribution.div_(self.class_distribution.sum().clamp_min(self.eps))
+        self.num_updates.add_(1)
+
+    def alignment_alpha(self, epoch: float) -> float:
+        """Sigmoid-decay schedule from Equation (17) of the paper."""
+        exponent = (float(epoch) - self.alignment_midpoint) / self.alignment_slope
+        exponent = min(max(exponent, -60.0), 60.0)
+        return self.alignment_strength / (1.0 + math.exp(exponent))
+
+    def uniform_alignment(
+        self, probabilities: torch.Tensor, epoch: float
+    ) -> torch.Tensor:
+        """Move the running class prior toward uniform before Equation (16)."""
+        self._validate_probabilities(probabilities)
+        uniform = torch.full_like(self.class_distribution, 1.0 / self.num_classes)
+        alpha = self.alignment_alpha(epoch)
+        adjusted_distribution = (
+            alpha * uniform + (1.0 - alpha) * self.class_distribution
+        )
+        ratio = (
+            adjusted_distribution / self.class_distribution.clamp_min(self.eps)
+        ).pow(
+            self.temperature
+        )
+        refined = probabilities * ratio
+        return refined / refined.sum(dim=1, keepdim=True).clamp_min(self.eps)
+
+    def compute_weights(self, probabilities: torch.Tensor) -> torch.Tensor:
+        """Compute the truncated Gaussian weights in Equation (8)."""
+        self._validate_probabilities(probabilities)
+        confidence = probabilities.amax(dim=1)
+        mean = self.confidence_mean.to(dtype=probabilities.dtype)
+        variance = self.confidence_variance.to(dtype=probabilities.dtype).clamp_min(
+            self.eps
+        )
+        decay = torch.exp(-((confidence - mean) ** 2) / (2.0 * variance))
+        return torch.where(
+            confidence < mean,
+            self.lambda_max * decay,
+            torch.full_like(confidence, self.lambda_max),
+        )
+
+    def forward(
+        self, probabilities: torch.Tensor, epoch: float
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self.update_statistics(probabilities)
+        weights = self.compute_weights(probabilities)
+        refined = self.uniform_alignment(probabilities, epoch)
+        return refined, weights
+
+    def _validate_probabilities(self, probabilities: torch.Tensor) -> None:
+        if probabilities.ndim != 2 or probabilities.shape[1] != self.num_classes:
+            raise ValueError(
+                "probabilities must have shape "
+                f"[batch, {self.num_classes}], got {tuple(probabilities.shape)}"
+            )
+        if probabilities.shape[0] == 0:
+            raise ValueError("target mini-batch must not be empty")
