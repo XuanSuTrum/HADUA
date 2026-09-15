@@ -199,7 +199,6 @@ The following configuration is used for the main results reported in the paper.
 |---|---:|
 | Kernel multiplier | 2.0 |
 | Number of kernels | 5 |
-| Internal CMMD scaling coefficient | 0.1 |
 
 ## Running HADUA
 
