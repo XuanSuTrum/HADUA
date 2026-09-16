@@ -31,7 +31,7 @@ Cross-subject emotion recognition from physiological signals is challenging due 
 HADUA/
 ├── README.md
 ├── requirements.txt             # Python dependencies
-├── main_zhibiao.py              # Main training and evaluation script
+├── main_.py              # Main training and evaluation script
 ├── SDA_DDA_3.py                 # HADUA model
 ├── guessmatch.py                # Soft Gaussian Weighting / pseudo-label refinement
 ├── mmd.py                       # MMD loss
